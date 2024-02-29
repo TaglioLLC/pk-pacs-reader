@@ -1,0 +1,5 @@
+__title__ = "pk-pacs-reader"
+__version__ = "0.1.4"
+__license__ = "MIT"
+__author__ = "Taglio LLC"
+__email__ = "pkpacs@taglio.com"

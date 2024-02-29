@@ -1,0 +1,71 @@
+<h2>Introduction</h2>
+<p>This software implements the PK-PACS specification in Python using a USB contactless smartcard reader.  This code is provided as-is and is intended
+to be used as a reference implementation.  Questions and comments about this software should be directed to <code>pkpacs@taglio.com</code>.</p>
+<p>The PK-PACS specification can be found here:
+https://github.com/TaglioLLC/pk-pacs-spec </p>
+<h2>Setup</h2>
+<p>You will need to have the following in order to run this utility:</p>
+<ul>
+<li>A machine running Windows 8 or greater, or Linux (e.g. Ubuntu 22.04 LTS). </li>
+<li>Python version 3.6 or greater, or version 3.11 or less.  We recommend version 3.11 if you're installing Python for the first time.  You can download version 3.11 <a href="https://www.python.org/downloads/">here</a>.</li>
+<li>A USB contactless card reader that supports ISO/IEC 14443 such as <a href="https://www.identiv.com/products/logical-access-control/smart-card-readers-writers/contactless-smart-card-readers-writers/3700f">this</a>.</li>
+<li>The reader needs to be plugged into a USB port on the machine.  Windows has built-in drivers for CCID compatible readers. </li>
+<li>A smartcard that implements the PK-PACS standard. (If you need a test card, contact Taglio at <code>pkpacs@taglio.com</code>). </li>
+</ul>
+<p>Before running the utility, you need to install the required packages.  If you are using Windows, this can be done by double-clicking on the <code>install_requirements.py</code> script.  If you are using Linux, please follow the directions in the next section.   </p>
+<h2>Linux installation</h2>
+<p>(Please skip to the next section if you are using Windows.)  Execute the following steps to install the required software:</p>
+<p><code>sudo apt install swig
+sudo apt install libpcsclite-dev
+sudo apt install pcsc-tools
+sudo apt install pcscd
+sudo apt install libccid
+sudo apt install libnss3-tools</code></p>
+<p>Then install the required Python packages by running:</p>
+<p><code>python3 install_requirements.py</code></p>
+<h2>Running</h2>
+<p>Double-clicking on pkpacs.py (Windows) or running <code>python3 pkpacs.py</code> (Linux) will run the PK-PACS utility in its <em>identifier</em> mode (this is the default mode without any command-line arguments), which will print the ID-OID value of the PK-PACS card presented, according to the <code>pkpacs_config.json</code> configuration file.</p>
+<p>Or you run can the <code>pkpacs.py</code> utility with the following command-line arguments:</p>
+<ul>
+<li><strong>-config</strong>  This argument specifies an alternate configuration file or path.  For example, you could specify <code>-config c:\some_path</code> and it will look for <code>pkpacs_config.json</code>
+in the <code>c:\some_path</code> directory.  Or you could specify <code>-config c:\some_path\my_config.json</code> and it will use the specified configuration file.  By default <code>pkpacs.py</code> will look
+in the same directory for <code>pkpacs_config.json</code></li>
+<li><strong>-test</strong>  This argument is a test mode that reads out information on the PK-PACS card presented.</li>
+<li><strong>-copy_keys</strong>  This will instruct the utlity to extract the public keys from the certificates in the PK-TrustCert Path and write them as <code>.pem</code> file into the PK-TrustKey Path. </li>
+<li><strong>-verbose</strong>  This is useful for debugging, etc. </li>
+</ul>
+<p>If you're using Windows, running the utlity from the command-line can be done from a command prompt (e.g. <code>cmd</code>).  Within <code>cmd</code> you can run <code>py</code>, which should be within the PATH to run Python.  So for example, after changing directories into the directory containing <code>pkpacs.py</code>, you can run:</p>
+<p><code>py pkpacs.py -test -verbose</code> </p>
+<p>If you're using Linux, running this utility from the command-line is recommended.  Typically, <code>python3</code> is pointing to a compatible version of Python:</p>
+<p><code>python3 pkpacs.py -test -verbose</code></p>
+<h2>Configuration</h2>
+<p>The configuration of the utility is contained in the <code>pkpacs_config.json</code> file, which is located in the same directory as <code>pkpacs.py</code> by default.  The file contains 
+the following configuration fields:</p>
+<ul>
+<li><strong>PK-TrustKey Path</strong>  This value is a string that specifies the path of the PK-TrustKeys, which should be in <code>.pem</code> format.  The path can either be relative to 
+the directory that <code>pkpacs.py</code> is located in, or it can be an absolute path.  For example <code>"c:\\some_path"</code>.  (Note, the use of double backslashes to indicate a backslash within a 
+string literal.)  </li>
+<li><strong>PK-TrustCert Path</strong> This value is a string that specifies the path of the PK-TrustCertificates, which can be in <code>.pem</code>, <code>.crt</code> , or <code>.cer</code> format.  The path can either 
+be relative to directory that <code>pkpacs.py</code> is located in, or it can be an absolute path.  For example <code>"c:\\some_path"</code>.  (Note, the use of double backslashes to indicate a
+backslash) within a string literal.</li>
+<li><strong>Keys</strong>  This is a list that specifies the order of public keys to try when validating the signature on a PK-PACS card.  Each key should be in <code>.pem</code> format.
+Each entry in the list looks like:
+<code>{"&lt;key label&gt;", "&lt;absolute file path to key or relative to Certificate Path&gt;"}</code>.  So for example, here is a possible list of keys containing relative paths to the PK-TrustKey Path or absolute paths:
+<code>"Keys": [
+    {"key1": "pkpacs_root.pem"},
+    {"key2": "pkpacs_demo.pem"},
+    {"key3": "c:\\demo_keys\\demo_cert.pem"}
+],</code></li>
+<li><strong>Priority List</strong>  A list of of validation combinations goes here.  This specifies the ID-OID value that gets printed to the console if the PK-PACS card is verified
+(both a challenge verification is successful and the signature is verified using the one of the keys listed in the <code>Keys</code> field).  If the first ID-OID in the Priority List isn't contained in the card, the second ID-OID in the Priority List is used, and so on.  If none of the ID-OID are present or the card fails during verification, no value is printed to the console.  The Priority List is in the following format:
+<code>["&lt;key label from Keys&gt;", "&lt;ID-OID"&gt;, "&lt;output format: UUID, HEX, or ASCII&gt;"]</code> Note, if <code>&lt;output format&gt;</code> is not specified, it will look-up the preferred format
+based on the ID-OID and use that format when printing. 
+For example, here is a Priority list with both implied and specified formats:<br />
+<code>"Priority List": [
+    ["key1", "44986.8.1"], 
+    ["key1", "44986.8.2", "HEX"], 
+    ["key2", "59685.8.2", "HEX"]
+],</code></li>
+</ul>
+<h2>Keeping in touch</h2>
+<p>Questions and comments about this software should be directed to <code>pkpacs@taglio.com</code>.</p>

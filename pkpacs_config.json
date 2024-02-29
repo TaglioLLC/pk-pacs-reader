@@ -1,0 +1,13 @@
+{
+    "PK-TrustKey Path": "keys",
+    "PK-TrustCert Path": "certs",
+    "Keys": [
+        {"key1": "taglio-demo-device-ca.pem"},
+        {"key2": "SECUPASCA1.pem"}
+    ],
+    "Priority List": [
+        ["key1", "44986.8.1"],
+        ["key1", "44986.8.8"],
+        ["key2", "44986.8.2"]
+    ]
+}
