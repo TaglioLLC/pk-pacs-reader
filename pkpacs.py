@@ -8,6 +8,7 @@ import json
 import argparse
 import uuid
 import secrets
+import base64
 from smartcard.System import readers
 from smartcard.Exceptions import CardConnectionException
 from pynput import keyboard
@@ -17,7 +18,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 DEFAULT_CONFIG = {
     # Path to directory containing public keys for use as PK-TrustKeys.
@@ -65,14 +67,15 @@ CRYPTO_LEN = 256
 MAX_LEN = 255
 CONTINUE_MASK = 0x6100
 COPIED_KEY_TAG = "copied_key"
-AID_INSTANCE_PKOC = bytes.fromhex("a00000030800001000")
-SELECT = bytes.fromhex("00a4 0400 09") + AID_INSTANCE_PKOC + bytes([0x00])
+TYPE_PROTOCOL_VERSION = 0x61
+AID_INSTANCE = bytes.fromhex("a00000030800001000") # application ID
+SELECT = bytes.fromhex("00a4 0400 09") + AID_INSTANCE + bytes([0x00])
 GET_DATA = bytes.fromhex("00cb 3fff 05 5c 03 5f c1 01") + bytes([0x00])
 GET_RESPONSE = bytes.fromhex("00c0 0000")
 CERTIFICATE_TYPES = ["pem", "cer", "crt"]
 KEY_TYPES = ["pem"]
 OID_PREFIX = "1.3.6.1.4.1."
-ID_OID_PREFIXES = ["44986", "59685"]
+ID_OID_PREFIXES = ["44986", "51432", "59685", "58268"]
 ID_OID_SUFFIXES = {
     ".2.1.1": {"name": "Certificate for Authentication", "format": "HEX"},
     ".2.1.0": {"name": "Certificate for Digital Signature", "format": "HEX"},
@@ -81,9 +84,24 @@ ID_OID_SUFFIXES = {
     ".8.1": {"name": "PK-PACS UUID", "format": "UUID"},
     ".8.2": {"name": "PK-PACS NUID", "format": "HEX"},
     ".8.3": {"name": "PK-PACS UID", "format": "HEX"},
-    ".8.8": {"name": "PK-PACS FAC/CSN", "format": "ASCII"},
+    ".8.8": {"name": "PK-PACS FAC/CSN", "format": "FAC/CSN"},
 }
+PKOC_TYPE_PROTOCOL_VERSION = 0x5c
+PKOC_VERSION_0100 = b'\x01\x00'
+PKOC_LEN_TX_ID = 0x10
+PKOC_LEN_READER_ID = 0x20
+PKOC_TYPE_TRANSACTION_IDENTIFIER = 0x4c
+PKOC_TYPE_READER_IDENTIFIER = 0x4d
+PKOC_AUTHENTICATE = bytes.fromhex('8080 0001 38')
+PKOC_AID_INSTANCE = bytes.fromhex('a000000898000001') # PKOC application ID
+PKOC_SELECT = bytes.fromhex("00a4 0400 08") + PKOC_AID_INSTANCE + bytes([0x00])
+PKOC_TYPE_PUBKEY = 0x5a
+PKOC_LEN_KEY = 0x20 
+PKOC_LEN_PUBKEY = 1 + PKOC_LEN_KEY*2
+PKOC_TYPE_SIGNATURE = 0x9e 
+PKOC_LEN_SIGNATURE = PKOC_LEN_KEY*2
 RETRIES = 10
+
 
 # Priority List indexes
 KEY_LABEL = 0
@@ -126,6 +144,25 @@ def find_tlv_tag(buffer, offset, tag, search_sub_tags):
 
     return None
 
+
+def parse_tlv(buf, ofs):
+    t = buf[ofs]
+    ofs += 1
+    l = buf[ofs]
+    ofs += 1
+    v = buf[ofs:ofs + l]
+    ofs += l
+    return t, v, ofs
+
+
+def build_tlv(tag, value):
+    return bytes([tag, len(value)]) + value
+
+
+def der_base64_encode(data):
+    preamble = bytes.fromhex("3059301306072A8648CE3D020106082A8648CE3D030107034200")
+    data = preamble + data
+    return base64.b64encode(data).decode()
 
 class PKPACS:
     """Implements PK-PACS specification in https://github.com/TaglioLLC/pk-pacs-spec"""
@@ -337,7 +374,9 @@ class PKPACS:
 
     def get_pk_cert(self):
         # Send _apdus to get certificate.
-        _, _ = self._apdu(SELECT)
+        type_encoded, _ = self._apdu(SELECT)
+        if type_encoded[0]!=TYPE_PROTOCOL_VERSION:
+            return None
         cert, status = self._apdu(GET_DATA, True)
         while (status & CONTINUE_MASK) == CONTINUE_MASK:
             length = status & 0xFF
@@ -467,7 +506,7 @@ class PKPACS:
             for suffix, val in ID_OID_SUFFIXES.items():
                 if oid.oid.dotted_string.endswith(suffix):
                     print(
-                        f"ID_OID: {oid.oid.dotted_string.replace(OID_PREFIX, '')}, {val['name']}: {'(0x)' if val['format']!='ASCII' else ''}{self.format_data(oid.value.public_bytes(), val['format'])}"
+                        f"ID_OID: {oid.oid.dotted_string.replace(OID_PREFIX, '')}, {val['name']}: {self.format_data(oid.value.public_bytes(), val['format'])}"
                     )
         elif self.verbose:
             print(
@@ -499,17 +538,39 @@ class PKPACS:
         if format_ == "UUID":
             if len(data) < 18:
                 raise RuntimeError(f"Error: UUID has {len(data)} bytes (needs 18).")
-            return str(uuid.UUID(bytes=data[2:]))
+            return "(0x)"+str(uuid.UUID(bytes=data[2:]))
         elif format_ == "HEX":
-            return data[2:].hex()
+            return "(0x)"+data[2:].hex()
         elif format_ == "ASCII":
             return data[2:].decode("ascii", "ignore")
+        elif format_ == "FAC/CSN":
+            string = data[2:].decode("ascii", "ignore")
+            try:
+                return f"FAC={int(string[:7])} CSN={int(string[7:])}"
+            except:
+                return string 
         else:
             raise RuntimeError(f'Error: format "{format_}" is not recogized.')
 
+    def _extract_cn(self, string):
+        try:
+            # Split the string into key-value pairs
+            pairs = string.split(",")
+            # Iterate through each pair
+            for pair in pairs:
+                # Check if the pair starts with 'CN='
+                if pair.startswith("CN="):
+                    # Return the value part by removing the 'CN=' part
+                    return pair[3:]
+        except:
+            pass 
+
+        return string
+
+
     def run_test(self, certificate):
-        print(f"Issuer: {certificate.issuer.rfc4514_string()}")
-        print(f"Subject: {certificate.subject.rfc4514_string()}")
+        print(f"Issuer: {self._extract_cn(certificate.issuer.rfc4514_string())}")
+        print(f"Subject: {self._extract_cn(certificate.subject.rfc4514_string())}")
         for id_oid in certificate.extensions:
             self.print_oid(id_oid)
 
@@ -565,6 +626,86 @@ class PKPACS:
                     elif self.verbose:
                         print("Challenge verification of the card failed.")
 
+    def run_pkoc_validate(self):
+        if self.verbose:
+            print("\nAttempting to read PKOC credentials...")
+        
+        # Select PKOC, see if it succeeds
+        type_encoded, _ = self._apdu(PKOC_SELECT)
+        type_, version, _ = parse_tlv(type_encoded, 0)
+        if type_!=PKOC_TYPE_PROTOCOL_VERSION or version!=PKOC_VERSION_0100:
+            if self.verbose:
+                print("Wrong type")
+            return None, None
+
+        # Construct challenge and send
+        tx_id = secrets.token_bytes(PKOC_LEN_TX_ID)
+        reader_id = secrets.token_bytes(PKOC_LEN_READER_ID)
+        tlv_version = build_tlv(PKOC_TYPE_PROTOCOL_VERSION, PKOC_VERSION_0100)
+        tlv_tx_id = build_tlv(PKOC_TYPE_TRANSACTION_IDENTIFIER, tx_id)
+        tlv_reader_id = build_tlv(PKOC_TYPE_READER_IDENTIFIER, reader_id)
+        resp, _ = self._apdu(PKOC_AUTHENTICATE + tlv_version + tlv_tx_id + tlv_reader_id)
+
+        # Parse response, extract public key and signature
+        q_x = None
+        q_y = None
+        sign_raw = None
+        ofs = 0
+        while ofs < len(resp):
+            type_, value, ofs = parse_tlv(resp, ofs)
+            if type_==PKOC_TYPE_PUBKEY:
+                if len(value) != PKOC_LEN_PUBKEY:
+                    raise RuntimeError(f'Unexpected length of public key: {len(value):02x}')
+                x_bytes = value[1:1 + PKOC_LEN_KEY]
+                y_bytes = value[1 + PKOC_LEN_KEY:]
+                full_key = value
+                q_x = int.from_bytes(x_bytes, byteorder='big', signed=False)
+                q_y = int.from_bytes(y_bytes, byteorder='big', signed=False)
+                continue
+            elif type_ == PKOC_TYPE_SIGNATURE:
+                if len(value) != PKOC_LEN_SIGNATURE:
+                    raise RuntimeError(f'Unexpected length of signature: {len(value):02x}')
+                sign_raw = value
+                continue
+            else:
+                # ignore unknown type_
+                continue
+
+        if q_x is None or q_y is None or sign_raw is None:
+            raise RuntimeError('Incomplete response to authenticate')
+
+        # Construct public key
+        pub_key = ec.EllipticCurvePublicNumbers(
+            x=q_x,
+            y=q_y,
+            curve=ec.SECP256R1()
+        ).public_key(default_backend())
+
+        # DER encode signature
+        r = int.from_bytes(sign_raw[:32], byteorder='big')
+        s = int.from_bytes(sign_raw[32:], byteorder='big')
+        signature = encode_dss_signature(r, s)
+
+        # Try to verify
+        try:
+            pub_key.verify(
+                signature,
+                tx_id,
+                ec.ECDSA(hashes.SHA256())
+            )
+            # We've successfully verified, print credentials in various formats
+            if not self.verbose:
+                print("")
+            print("PKOC select and challenge verify succeeded! (credentials below)")
+            print(f"    64-bit: (0x){x_bytes[-8:].hex()}")
+            print(f"    256-bit: (0x){x_bytes.hex()}")
+            print(f"    DER Base64: {der_base64_encode(full_key)}")
+        except InvalidSignature:
+            if self.verbose:
+                print("PKOC select succeeded, challenge verify failed.")
+            return None, None
+        return q_x, q_y
+
     def run_loop(self, test):
         # Run "listener" for q keypress.
         print("Waiting for card... (Press q to quit.)")
@@ -587,7 +728,19 @@ class PKPACS:
                     self.run_validate(certificate)
 
             except Exception as e:
-                print(f"An unexpected exception ocurred: {e}")
+                if self.verbose:
+                    print(f"An exception ocurred: {e}")
+                print(f"This doesn't appear to be a valid PK-PACS card.")
+            # Try PKOC if we're in test mode
+            if test:
+                try:
+                    x, y = self.run_pkoc_validate()
+                    if x is None and y is None:
+                        raise RuntimeError() # Print message below
+                except Exception as e:
+                    if self.verbose:
+                        print(f"An exception ocurred: {e}")
+                        print(f"This doesn't appear to be a valid PKOC card.")
 
 
 def main():
